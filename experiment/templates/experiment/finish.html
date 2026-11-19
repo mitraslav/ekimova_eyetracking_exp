@@ -1,4 +1,49 @@
 {% load static %}
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Готово</title>
-<link rel="stylesheet" href="{% static 'experiment/style.css' %}"></head><body>
-<div class="page"><div class="card"><h1>Спасибо!</h1><p>Эксперимент завершён.</p></div></div></body></html>
+<!doctype html>
+<html lang="ru">
+
+<head>
+  <meta charset="utf-8">
+
+  <title>
+    Готово
+  </title>
+
+  <link
+    rel="stylesheet"
+    href="{% static 'experiment/style.css' %}"
+  >
+
+  <script type="module">
+    import EmbeddedPageSdk from "https://app.realeye.io/sdk/js/testRunnerEmbeddableSdk-latest.js";
+
+    window.addEventListener("DOMContentLoaded", () => {
+      window.reSdk = new EmbeddedPageSdk(
+        false,
+        null,
+        false
+      );
+    });
+  </script>
+</head>
+
+<body>
+
+<div class="page">
+
+  <div class="card">
+
+    <h1>
+      Спасибо!
+    </h1>
+
+    <p>
+      Эксперимент завершён.
+    </p>
+
+  </div>
+
+</div>
+
+</body>
+</html>
