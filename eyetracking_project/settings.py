@@ -75,9 +75,7 @@ CSRF_COOKIE_SECURE = True
 SESSION_COOKIE_SAMESITE = 'None'
 SESSION_COOKIE_SECURE = True
 
-CHIASM_TOKEN = os.getenv("CHIASM_TOKEN")
-
-DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
-
 CHIASM_AUTH_TOKEN = os.getenv("CHIASM_AUTH_TOKEN", "")
 CHIASM_EXPERIMENT_ID = os.getenv("CHIASM_EXPERIMENT_ID", "")
+
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
