@@ -1,53 +1,51 @@
 {% load static %}
+
 <!doctype html>
 <html lang="ru">
 
 <head>
   <meta charset="utf-8">
 
-  <title>
-    Проба {{ trial_number }}
-  </title>
+  <title>Эксперимент</title>
 
   <link
     rel="stylesheet"
     href="{% static 'experiment/style.css' %}"
   >
-
-  <script type="module">
-    import EmbeddedPageSdk from "https://app.realeye.io/sdk/js/testRunnerEmbeddableSdk-latest.js";
-
-    window.addEventListener("DOMContentLoaded", () => {
-      window.reSdk = new EmbeddedPageSdk(
-        false,
-        null,
-        false
-      );
-    });
-  </script>
 </head>
 
 <body class="locked">
 
+<!-- Нужен для CSRF-cookie -->
+<div style="display:none;">
+  {% csrf_token %}
+</div>
+
+
+<!-- Фиксационный крест -->
 <div
   id="fixation-overlay"
-  class="fixation-overlay"
+  class="fixation-overlay is-hidden"
 >
   <div class="fixation-cross">
     +
   </div>
 </div>
 
+
+<!-- Основная страница trial -->
 <div
   id="trial"
   class="page"
+  style="visibility:hidden;"
 >
 
   <div class="form-card">
 
-    <div class="meta">
-      Проба {{ trial_number }} из {{ total_trials }}
-    </div>
+    <div
+      id="trial-meta"
+      class="meta"
+    ></div>
 
     <h1>
       Регистрация
@@ -57,53 +55,20 @@
       Проверьте данные и нажмите «Продолжить».
     </p>
 
+
     <div class="global-error-slot">
 
       <div
         id="global-error"
         class="error-popover global-popover is-hidden"
-      >
-        {{ error_message }}
-      </div>
+      ></div>
 
     </div>
 
+
     <form onsubmit="return false;">
 
-      {% for field in fields %}
-
-        <div
-          class="field-block"
-          data-field="{{ field.name }}"
-        >
-
-          <label for="{{ field.name }}">
-            {{ field.label }}
-          </label>
-
-          <input
-            id="{{ field.name }}"
-            name="{{ field.name }}"
-            type="{% if field.name == 'password' %}password{% else %}text{% endif %}"
-            value="{{ field.value }}"
-            {% if field.is_target %}
-              data-re-aoi-name="target-field"
-            {% endif %}
-          >
-
-          {% if field.is_target and condition == 'local' %}
-
-            <div
-              class="error-popover local-popover is-hidden"
-            >
-              {{ error_message }}
-            </div>
-
-          {% endif %}
-
-        </div>
-
-      {% endfor %}
+      <div id="fields-container"></div>
 
       <button
         id="continue"
@@ -115,23 +80,60 @@
     </form>
 
   </div>
+
 </div>
+
+
+<!-- Финальный экран.
+     Он находится на той же странице,
+     поэтому tracker не уничтожается. -->
+<div
+  id="finish-screen"
+  class="page"
+  style="display:none;"
+>
+
+  <div class="card">
+
+    <h1>
+      Спасибо!
+    </h1>
+
+    <p>
+      Эксперимент завершён.
+    </p>
+
+  </div>
+
+</div>
+
+
+<!-- Первая проба из Django -->
+{{ initial_trial|json_script:"initial-trial-data" }}
+
 
 <script>
 window.EXPERIMENT = {
-  trialNumber: {{ trial_number }},
-  totalTrials: {{ total_trials }},
-  targetField: "{{ target_field }}",
-  condition: "{{ condition }}",
+  participantId:
+    "{{ participant_id|escapejs }}",
 
   saveUrl:
     "{% url 'experiment:save_result' %}",
 
-  nextUrl:
-    "{% if trial_number < total_trials %}{% url 'experiment:trial' trial_number=trial_number|add:'1' %}{% else %}{% url 'experiment:finish' %}{% endif %}"
+  chiasmToken:
+    "{{ chiasm_token|escapejs }}",
+
+  chiasmExperimentId:
+    "{{ chiasm_experiment_id|escapejs }}"
 };
 </script>
 
+
+<!-- Chiasm -->
+<script src="https://cdn.chiasm.eu/latest/chiasm-tracker.js"></script>
+
+
+<!-- Наш эксперимент -->
 <script
   src="{% static 'experiment/trial.js' %}">
 </script>

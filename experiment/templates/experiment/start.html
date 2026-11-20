@@ -1,55 +1,58 @@
 {% load static %}
+
 <!doctype html>
 <html lang="ru">
+
 <head>
   <meta charset="utf-8">
-  <title>Эксперимент</title>
 
-  <link rel="stylesheet" href="{% static 'experiment/style.css' %}">
+  <title>
+    Эксперимент
+  </title>
 
-  <script type="module">
-    import EmbeddedPageSdk from "https://app.realeye.io/sdk/js/testRunnerEmbeddableSdk-latest.js";
-
-    window.addEventListener("DOMContentLoaded", () => {
-      window.reSdk = new EmbeddedPageSdk(
-        false,
-        null,
-        false
-      );
-    });
-  </script>
+  <link
+    rel="stylesheet"
+    href="{% static 'experiment/style.css' %}"
+  >
 </head>
 
 <body>
 
 <div class="page">
+
   <div class="card">
 
-    <h1>Эксперимент с веб-формами</h1>
+    <h1>
+      Эксперимент с веб-формами
+    </h1>
 
     <p>
       Вам будут показаны несколько веб-форм.
-      После нажатия «Продолжить» появится сообщение об ошибке.
+      После нажатия «Продолжить» появится
+      сообщение об ошибке.
     </p>
 
     <p>
       Ваша задача — как можно быстрее определить,
-      какое поле необходимо исправить, и нажать на это поле.
+      какое поле необходимо исправить,
+      и нажать на это поле.
     </p>
 
     <p>
-      Во время выполнения смотрите на экран естественным образом
-      и по возможности сохраняйте положение головы.
+      Во время выполнения смотрите на экран
+      естественным образом и по возможности
+      сохраняйте положение головы.
     </p>
 
     <p>
       <strong>
-        Продолжительность: около 7–10 минут,
-        включая калибровку и тренировочную пробу.
+        Перед началом будет проведена
+        калибровка веб-камеры.
       </strong>
     </p>
 
     <form method="post">
+
       {% csrf_token %}
 
       <label for="participant_id">
@@ -60,6 +63,7 @@
         id="participant_id"
         name="participant_id"
         placeholder="Например, P01"
+        required
       >
 
       <button type="submit">
@@ -69,6 +73,7 @@
     </form>
 
   </div>
+
 </div>
 
 </body>

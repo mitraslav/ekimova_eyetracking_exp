@@ -1,10 +1,22 @@
-import json, random
+import json
+import random
+
+from django.conf import settings
 from django.http import JsonResponse, HttpResponseBadRequest
 from django.shortcuts import render, redirect
 from django.views.decorators.http import require_POST
+
 from .models import TrialResult
 
-FIELDS=[('name','Имя'),('email','E-mail'),('phone','Телефон'),('password','Пароль')]
+
+FIELDS = [
+    ('name', 'Имя'),
+    ('email', 'E-mail'),
+    ('phone', 'Телефон'),
+    ('password', 'Пароль'),
+]
+
+
 BASE_TRIALS = [
     # LOCAL + TOP
     {"condition": "local", "target_field": "name",     "target_position": "top"},
@@ -38,40 +50,46 @@ BASE_TRIALS = [
     {"condition": "global", "target_field": "phone",    "target_position": "bottom"},
     {"condition": "global", "target_field": "password", "target_position": "bottom"},
 ]
-ERROR_MESSAGES={
-    'name':'Проверьте поле «Имя».',
-    'email':'Введите корректный адрес электронной почты.',
-    'phone':'Введите корректный номер телефона.',
-    'password':'Пароль должен содержать не менее 8 символов.',
+
+
+ERROR_MESSAGES = {
+    'name': 'Проверьте поле «Имя».',
+    'email': 'Введите корректный адрес электронной почты.',
+    'phone': 'Введите корректный номер телефона.',
+    'password': 'Пароль должен содержать не менее 8 символов.',
 }
-VALUES={'name':'Анна','email':'anna@example.com','phone':'+7 999 123-45-67','password':'12345'}
 
-def start(request):
-    if request.method=='POST':
-        pid=request.POST.get('participant_id','').strip() or 'anonymous'
-        trials=BASE_TRIALS.copy(); random.shuffle(trials)
-        request.session['participant_id']=pid
-        request.session['trials']=trials
-        return redirect('experiment:trial',trial_number=1)
-    return render(request,'experiment/start.html')
 
-def trial(request,trial_number):
-    trials=request.session.get('trials'); pid=request.session.get('participant_id')
-    if not trials or not pid: return redirect('experiment:start')
-    if trial_number<1 or trial_number>len(trials): return redirect('experiment:finish')
+VALUES = {
+    'name': 'Анна',
+    'email': 'anna@example.com',
+    'phone': '+7 999 123-45-67',
+    'password': '12345',
+}
+
+
+def make_trial_payload(trials, trial_number):
+    """
+    Создаёт данные одной пробы для JavaScript.
+    trial_number начинается с 1.
+    """
+
     t = trials[trial_number - 1]
 
     target_field = t['target_field']
     target_position = t['target_position']
 
-    # Отделяем проблемное поле от остальных
-    target_item = next(item for item in FIELDS if item[0] == target_field)
-    other_items = [item for item in FIELDS if item[0] != target_field]
+    target_item = next(
+        item for item in FIELDS
+        if item[0] == target_field
+    )
 
-    # Чтобы остальные поля не всегда стояли одинаково
-    random.shuffle(other_items)
+    # Остальные поля оставляем в стабильном порядке.
+    other_items = [
+        item for item in FIELDS
+        if item[0] != target_field
+    ]
 
-    # Помещаем проблемное поле строго сверху или снизу
     if target_position == 'top':
         ordered_fields = [target_item] + other_items
     else:
@@ -79,42 +97,196 @@ def trial(request,trial_number):
 
     rows = [
         {
-            'name': n,
+            'name': name,
             'label': label,
-            'value': VALUES[n],
-            'is_target': n == target_field
+            'value': VALUES[name],
+            'is_target': name == target_field,
         }
-        for n, label in ordered_fields
+        for name, label in ordered_fields
     ]
-    return render(request, 'experiment/trial.html', {
+
+    return {
         'trial_number': trial_number,
         'total_trials': len(trials),
         'condition': t['condition'],
-        'target_field': t['target_field'],
-        'target_position': t['target_position'],
-        'error_message': ERROR_MESSAGES[t['target_field']],
+        'target_field': target_field,
+        'target_position': target_position,
+        'error_message': ERROR_MESSAGES[target_field],
         'fields': rows,
-    })
+    }
+
+
+def start(request):
+    if request.method == 'POST':
+        participant_id = (
+            request.POST.get('participant_id', '').strip()
+            or 'anonymous'
+        )
+
+        trials = BASE_TRIALS.copy()
+        random.shuffle(trials)
+
+        request.session['participant_id'] = participant_id
+        request.session['trials'] = trials
+
+        # Теперь текущая проба хранится в session.
+        request.session['current_trial_number'] = 1
+
+        return redirect('experiment:trial')
+
+    return render(
+        request,
+        'experiment/start.html'
+    )
+
+
+def trial(request):
+    trials = request.session.get('trials')
+    participant_id = request.session.get('participant_id')
+
+    if not trials or not participant_id:
+        return redirect('experiment:start')
+
+    trial_number = request.session.get(
+        'current_trial_number',
+        1
+    )
+
+    if trial_number > len(trials):
+        return redirect('experiment:finish')
+
+    initial_trial = make_trial_payload(
+        trials,
+        trial_number
+    )
+
+    return render(
+        request,
+        'experiment/trial.html',
+        {
+            'participant_id': participant_id,
+            'initial_trial': initial_trial,
+
+            'chiasm_token':
+                settings.CHIASM_AUTH_TOKEN,
+
+            'chiasm_experiment_id':
+                settings.CHIASM_EXPERIMENT_ID,
+        }
+    )
+
 
 @require_POST
 def save_result(request):
-    try: payload=json.loads(request.body.decode('utf-8'))
-    except json.JSONDecodeError: return HttpResponseBadRequest('Invalid JSON')
-    pid=request.session.get('participant_id'); trials=request.session.get('trials')
-    if not pid or not trials: return JsonResponse({'ok':False},status=400)
-    n=int(payload['trial_number'])
-    if n<1 or n>len(trials): return JsonResponse({'ok':False},status=400)
-    t=trials[n-1]
+    try:
+        payload = json.loads(
+            request.body.decode('utf-8')
+        )
+    except json.JSONDecodeError:
+        return HttpResponseBadRequest(
+            'Invalid JSON'
+        )
+
+    participant_id = request.session.get(
+        'participant_id'
+    )
+
+    trials = request.session.get('trials')
+
+    if not participant_id or not trials:
+        return JsonResponse(
+            {'ok': False},
+            status=400
+        )
+
+    trial_number = int(
+        payload['trial_number']
+    )
+
+    expected_trial = request.session.get(
+        'current_trial_number',
+        1
+    )
+
+    # Защита от случайной повторной отправки.
+    if trial_number != expected_trial:
+        return JsonResponse(
+            {
+                'ok': False,
+                'error': 'Unexpected trial number',
+            },
+            status=400
+        )
+
+    if (
+        trial_number < 1
+        or trial_number > len(trials)
+    ):
+        return JsonResponse(
+            {'ok': False},
+            status=400
+        )
+
+    t = trials[trial_number - 1]
+
     TrialResult.objects.update_or_create(
-        participant_id=pid,trial_number=n,
+        participant_id=participant_id,
+        trial_number=trial_number,
+
         defaults={
-            'condition': t['condition'],
-            'target_field': t['target_field'],
-            'target_position': t['target_position'],
-            'response_time_ms': payload.get('response_time_ms'),
-            'clicked_correct_field': bool(payload.get('clicked_correct_field'))
+            'condition':
+                t['condition'],
+
+            'target_field':
+                t['target_field'],
+
+            'target_position':
+                t['target_position'],
+
+            'response_time_ms':
+                payload.get(
+                    'response_time_ms'
+                ),
+
+            'clicked_correct_field':
+                bool(
+                    payload.get(
+                        'clicked_correct_field'
+                    )
+                ),
         }
     )
-    return JsonResponse({'ok':True})
 
-def finish(request): return render(request,'experiment/finish.html')
+    next_trial_number = trial_number + 1
+
+    request.session[
+        'current_trial_number'
+    ] = next_trial_number
+
+    request.session.modified = True
+
+    # Последняя проба.
+    if next_trial_number > len(trials):
+        return JsonResponse({
+            'ok': True,
+            'finished': True,
+        })
+
+    # Возвращаем следующую пробу прямо в JS.
+    next_trial = make_trial_payload(
+        trials,
+        next_trial_number
+    )
+
+    return JsonResponse({
+        'ok': True,
+        'finished': False,
+        'next_trial': next_trial,
+    })
+
+
+def finish(request):
+    return render(
+        request,
+        'experiment/finish.html'
+    )
