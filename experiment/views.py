@@ -1,7 +1,6 @@
 import json
 import random
 
-from django.conf import settings
 from django.http import JsonResponse, HttpResponseBadRequest
 from django.shortcuts import render, redirect
 from django.views.decorators.http import require_POST
@@ -71,7 +70,7 @@ VALUES = {
 def make_trial_payload(trials, trial_number):
     """
     Создаёт данные одной пробы для JavaScript.
-    trial_number начинается с 1.
+    Нумерация проб начинается с 1.
     """
 
     t = trials[trial_number - 1]
@@ -84,12 +83,13 @@ def make_trial_payload(trials, trial_number):
         if item[0] == target_field
     )
 
-    # Остальные поля оставляем в стабильном порядке.
+    # Остальные поля остаются в стабильном порядке.
     other_items = [
         item for item in FIELDS
         if item[0] != target_field
     ]
 
+    # Расположение проблемного поля.
     if target_position == 'top':
         ordered_fields = [target_item] + other_items
     else:
@@ -116,20 +116,25 @@ def make_trial_payload(trials, trial_number):
     }
 
 
+# ========================================
+# СТАРТОВАЯ СТРАНИЦА
+# ========================================
+
 def start(request):
+
     if request.method == 'POST':
+
         participant_id = (
             request.POST.get('participant_id', '').strip()
             or 'anonymous'
         )
 
+        # Рандомизация порядка 24 проб.
         trials = BASE_TRIALS.copy()
         random.shuffle(trials)
 
         request.session['participant_id'] = participant_id
         request.session['trials'] = trials
-
-        # Теперь текущая проба хранится в session.
         request.session['current_trial_number'] = 1
 
         return redirect('experiment:trial')
@@ -140,9 +145,17 @@ def start(request):
     )
 
 
+# ========================================
+# ОСНОВНАЯ СТРАНИЦА ЭКСПЕРИМЕНТА
+# ========================================
+
 def trial(request):
+
     trials = request.session.get('trials')
-    participant_id = request.session.get('participant_id')
+
+    participant_id = request.session.get(
+        'participant_id'
+    )
 
     if not trials or not participant_id:
         return redirect('experiment:start')
@@ -166,25 +179,34 @@ def trial(request):
         {
             'participant_id': participant_id,
             'initial_trial': initial_trial,
-
-            'chiasm_token':
-                settings.CHIASM_AUTH_TOKEN,
-
-            'chiasm_experiment_id':
-                settings.CHIASM_EXPERIMENT_ID,
         }
     )
 
 
+# ========================================
+# СОХРАНЕНИЕ РЕЗУЛЬТАТОВ ПРОБЫ
+# ========================================
+
 @require_POST
 def save_result(request):
+
+    # Получаем данные из trial.js.
     try:
         payload = json.loads(
             request.body.decode('utf-8')
         )
-    except json.JSONDecodeError:
+
+        if not isinstance(payload, dict):
+            raise ValueError('Invalid payload')
+
+        trial_number = payload['trial_number']
+
+        if type(trial_number) is not int:
+            raise ValueError('Invalid trial number')
+
+    except (ValueError, KeyError, TypeError):
         return HttpResponseBadRequest(
-            'Invalid JSON'
+            'Invalid trial data'
         )
 
     participant_id = request.session.get(
@@ -195,21 +217,32 @@ def save_result(request):
 
     if not participant_id or not trials:
         return JsonResponse(
-            {'ok': False},
+            {
+                'ok': False,
+                'error': 'Session not found',
+            },
             status=400
         )
-
-    trial_number = int(
-        payload['trial_number']
-    )
 
     expected_trial = request.session.get(
         'current_trial_number',
         1
     )
 
-    # Защита от случайной повторной отправки.
+    # Проверяем номер пробы.
+    if trial_number < 1 or trial_number > len(trials):
+
+        return JsonResponse(
+            {
+                'ok': False,
+                'error': 'Invalid trial number',
+            },
+            status=400
+        )
+
+    # Защита от повторной отправки одной пробы.
     if trial_number != expected_trial:
+
         return JsonResponse(
             {
                 'ok': False,
@@ -218,22 +251,59 @@ def save_result(request):
             status=400
         )
 
+    t = trials[trial_number - 1]
+
+    # Получаем поведенческие данные.
+    response_time_ms = payload.get(
+        'response_time_ms'
+    )
+
+    clicked_correct_field = payload.get(
+        'clicked_correct_field'
+    )
+
+    # Получаем данные WebGazer.
+    time_to_target_aoi_ms = payload.get(
+        'time_to_target_aoi_ms'
+    )
+
+    # Проверяем корректность полученных метрик.
     if (
-        trial_number < 1
-        or trial_number > len(trials)
+        type(response_time_ms) is not int
+        or response_time_ms < 0
+        or type(clicked_correct_field) is not bool
     ):
         return JsonResponse(
-            {'ok': False},
+            {
+                'ok': False,
+                'error': 'Invalid behavioral data',
+            },
             status=400
         )
 
-    t = trials[trial_number - 1]
+    if time_to_target_aoi_ms is not None:
 
+        if (
+            type(time_to_target_aoi_ms) is not int
+            or time_to_target_aoi_ms < 0
+            or time_to_target_aoi_ms > response_time_ms
+        ):
+            return JsonResponse(
+                {
+                    'ok': False,
+                    'error': 'Invalid eye-tracking data',
+                },
+                status=400
+            )
+
+    # Сохраняем результаты в базе Django.
     TrialResult.objects.update_or_create(
+
         participant_id=participant_id,
         trial_number=trial_number,
 
         defaults={
+
             'condition':
                 t['condition'],
 
@@ -244,19 +314,17 @@ def save_result(request):
                 t['target_position'],
 
             'response_time_ms':
-                payload.get(
-                    'response_time_ms'
-                ),
+                response_time_ms,
+
+            'time_to_target_aoi_ms':
+                time_to_target_aoi_ms,
 
             'clicked_correct_field':
-                bool(
-                    payload.get(
-                        'clicked_correct_field'
-                    )
-                ),
+                clicked_correct_field,
         }
     )
 
+    # Переходим к следующей пробе.
     next_trial_number = trial_number + 1
 
     request.session[
@@ -265,14 +333,15 @@ def save_result(request):
 
     request.session.modified = True
 
-    # Последняя проба.
+    # Если завершилась последняя проба.
     if next_trial_number > len(trials):
+
         return JsonResponse({
             'ok': True,
             'finished': True,
         })
 
-    # Возвращаем следующую пробу прямо в JS.
+    # Возвращаем данные следующей пробы.
     next_trial = make_trial_payload(
         trials,
         next_trial_number
@@ -285,7 +354,12 @@ def save_result(request):
     })
 
 
+# ========================================
+# ЗАВЕРШЕНИЕ ЭКСПЕРИМЕНТА
+# ========================================
+
 def finish(request):
+
     return render(
         request,
         'experiment/finish.html'

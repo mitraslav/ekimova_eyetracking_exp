@@ -7,6 +7,12 @@
   // DOM
   // ----------------------------------------
 
+  const calibrationScreen =
+    document.getElementById('calibration-screen');
+
+  const calibrationStatus =
+    document.getElementById('calibration-status');
+
   const trialPage =
     document.getElementById('trial');
 
@@ -30,7 +36,7 @@
 
 
   // ----------------------------------------
-  // Начальные данные
+  // Trial state
   // ----------------------------------------
 
   let currentTrial = JSON.parse(
@@ -39,57 +45,322 @@
       .textContent
   );
 
-  let tracker = null;
-
   let errorShownAt = null;
+
   let saved = false;
-  let recording = false;
+
+  let gazeMeasurementActive = false;
+
+  let timeToTargetAoiMs = null;
 
 
-  // ----------------------------------------
-  // Chiasm initialization
-  // ----------------------------------------
+  /*
+   * Для приближённой "фиксации":
+   * взгляд должен оставаться внутри AOI
+   * минимум 100 мс.
+   */
+  const FIXATION_MIN_MS = 100;
+
+  let aoiEntryStartedAt = null;
+
+
+  // ========================================
+  // WEBGAZER
+  // ========================================
 
   try {
 
-    tracker = await initChiasmTracker({
-      authToken: config.chiasmToken
-    });
+    /*
+     * Участники не должны наследовать
+     * калибровку предыдущего человека
+     * на этом компьютере.
+     */
+    webgazer.saveDataAcrossSessions(false);
+
+    webgazer.applyKalmanFilter(true);
+
+    webgazer.showPredictionPoints(false);
+
+    webgazer.showVideo(true);
+
+    webgazer.showFaceOverlay(true);
+
+    webgazer.showFaceFeedbackBox(true);
 
 
-    tracker.setExpInfo(
-      config.chiasmExperimentId,
-      config.participantId,
-      true
+    webgazer.setGazeListener(
+      handleGazePrediction
     );
 
 
-    await tracker.startSession();
+    await webgazer.begin();
 
 
-    // Сначала screen-size calibration.
-    await tracker.showScreenCalibration();
+    /*
+     * Убираем автоматическое обучение
+     * на обычных кликах мыши.
+     * Калибровочные точки запишем сами.
+     */
+    webgazer.removeMouseEventListeners();
 
 
-    // Затем webcam preview + gaze calibration
-    // + validation.
-    await tracker.setupTrackerWithRetries();
+    calibrationStatus.textContent =
+      'Смотрите на каждую точку и нажмите её 3 раза.';
 
 
-    // Калибровка закончилась.
-    await startTrial(currentTrial);
+    setupCalibrationPoints();
+
 
   } catch (error) {
 
     console.error(
-      'Chiasm initialization error:',
+      'WebGazer initialization error:',
       error
     );
 
+    calibrationStatus.textContent =
+      'Не удалось запустить камеру.';
+
     alert(
       'Не удалось запустить айтрекинг. ' +
-      'Откройте Console (F12) и пришлите ошибку.'
+      'Проверьте разрешение камеры.'
     );
+
+  }
+
+
+
+  // ========================================
+  // CALIBRATION
+  // ========================================
+
+  function setupCalibrationPoints() {
+
+    const points =
+      document.querySelectorAll(
+        '.calibration-point'
+      );
+
+    let finishedPoints = 0;
+
+
+    points.forEach(point => {
+
+      let clickCount = 0;
+
+
+      point.addEventListener(
+        'click',
+        () => {
+
+          const rect =
+            point.getBoundingClientRect();
+
+
+          const x =
+            rect.left
+            + rect.width / 2;
+
+
+          const y =
+            rect.top
+            + rect.height / 2;
+
+
+          /*
+           * Говорим WebGazer:
+           * пользователь смотрел сюда.
+           */
+          webgazer.recordScreenPosition(
+            x,
+            y,
+            'click'
+          );
+
+
+          clickCount += 1;
+
+
+          /*
+           * Визуально показываем прогресс.
+           */
+          point.style.opacity =
+            String(
+              Math.max(
+                0.25,
+                1 - clickCount * 0.25
+              )
+            );
+
+
+          if (clickCount >= 3) {
+
+            point.classList.add(
+              'done'
+            );
+
+            finishedPoints += 1;
+
+
+            if (
+              finishedPoints
+              === points.length
+            ) {
+
+              finishCalibration();
+            }
+          }
+
+        }
+      );
+
+    });
+
+  }
+
+
+
+  async function finishCalibration() {
+
+    calibrationStatus.textContent =
+      'Калибровка завершена.';
+
+
+    await sleep(500);
+
+
+    calibrationScreen.style.display =
+      'none';
+
+
+    /*
+     * Видео участнику во время
+     * самих проб уже не нужно.
+     */
+    webgazer.showVideo(false);
+
+    webgazer.showFaceOverlay(false);
+
+    webgazer.showFaceFeedbackBox(false);
+
+    webgazer.showPredictionPoints(false);
+
+
+    await startTrial(currentTrial);
+  }
+
+
+
+  // ========================================
+  // GAZE LISTENER
+  // ========================================
+
+  function handleGazePrediction(
+    data,
+    elapsedTime
+  ) {
+
+    if (!data) {
+      return;
+    }
+
+
+    /*
+     * Пока ошибка не появилась,
+     * метрика не считается.
+     */
+    if (
+      !gazeMeasurementActive
+      || errorShownAt === null
+      || timeToTargetAoiMs !== null
+    ) {
+      return;
+    }
+
+
+    const target =
+      document.getElementById(
+        currentTrial.target_field
+      );
+
+
+    if (!target) {
+      return;
+    }
+
+
+    const rect =
+      target.getBoundingClientRect();
+
+
+    /*
+     * Небольшой запас AOI 8 px.
+     */
+    const margin = 8;
+
+
+    const inside =
+      data.x >= rect.left - margin
+      && data.x <= rect.right + margin
+      && data.y >= rect.top - margin
+      && data.y <= rect.bottom + margin;
+
+
+    const now =
+      performance.now();
+
+
+    if (inside) {
+
+      /*
+       * Первое попадание.
+       */
+      if (
+        aoiEntryStartedAt === null
+      ) {
+
+        aoiEntryStartedAt = now;
+
+        return;
+      }
+
+
+      /*
+       * Считаем "фиксацией",
+       * если взгляд остаётся в AOI
+       * хотя бы 100 мс.
+       */
+      if (
+        now - aoiEntryStartedAt
+        >= FIXATION_MIN_MS
+      ) {
+
+        timeToTargetAoiMs =
+          Math.round(
+            aoiEntryStartedAt
+            - errorShownAt
+          );
+
+
+        gazeMeasurementActive =
+          false;
+
+
+        console.log(
+          'Target AOI fixation:',
+          timeToTargetAoiMs,
+          'ms'
+        );
+      }
+
+    } else {
+
+      /*
+       * Взгляд ушёл из AOI до 100 мс:
+       * это не считаем фиксацией.
+       */
+      aoiEntryStartedAt = null;
+    }
 
   }
 
@@ -103,20 +374,21 @@
 
     currentTrial = trial;
 
+
     meta.textContent =
-      `Проба ${trial.trial_number} из ${trial.total_trials}`;
+      `Проба ${trial.trial_number} ` +
+      `из ${trial.total_trials}`;
 
 
-    // Глобальная ошибка
     globalError.textContent =
       trial.error_message;
+
 
     globalError.classList.add(
       'is-hidden'
     );
 
 
-    // Поля
     fieldsContainer.innerHTML = '';
 
 
@@ -125,8 +397,10 @@
       const block =
         document.createElement('div');
 
+
       block.className =
         'field-block';
+
 
       block.dataset.field =
         field.name;
@@ -135,8 +409,10 @@
       const label =
         document.createElement('label');
 
+
       label.htmlFor =
         field.name;
+
 
       label.textContent =
         field.label;
@@ -145,32 +421,30 @@
       const input =
         document.createElement('input');
 
+
       input.id =
         field.name;
 
+
       input.name =
         field.name;
+
 
       input.type =
         field.name === 'password'
           ? 'password'
           : 'text';
 
+
       input.value =
         field.value;
 
 
-      // AOI = только проблемное поле.
-      if (field.is_target) {
-        input.dataset.targetAoi = 'true';
-      }
-
-
       block.appendChild(label);
+
       block.appendChild(input);
 
 
-      // LOCAL error
       if (
         field.is_target
         && trial.condition === 'local'
@@ -179,13 +453,20 @@
         const localError =
           document.createElement('div');
 
+
         localError.className =
-          'error-popover local-popover is-hidden';
+          'error-popover ' +
+          'local-popover ' +
+          'is-hidden';
+
 
         localError.textContent =
           trial.error_message;
 
-        block.appendChild(localError);
+
+        block.appendChild(
+          localError
+        );
       }
 
 
@@ -202,15 +483,26 @@
     });
 
 
-    continueButton.disabled = false;
+    continueButton.disabled =
+      false;
+
 
     continueButton.textContent =
       'Продолжить';
 
 
     errorShownAt = null;
+
     saved = false;
-    recording = false;
+
+    gazeMeasurementActive =
+      false;
+
+    timeToTargetAoiMs =
+      null;
+
+    aoiEntryStartedAt =
+      null;
   }
 
 
@@ -258,66 +550,49 @@
 
 
   // ========================================
-  // ERROR APPEARS
+  // SHOW ERROR
   // ========================================
 
   continueButton.addEventListener(
     'click',
-    async () => {
+    () => {
 
-      if (errorShownAt !== null) {
+      if (
+        errorShownAt !== null
+      ) {
         return;
       }
 
 
-      continueButton.disabled = true;
+      /*
+       * С этого момента начинается
+       * измерение eye-tracking DV.
+       */
+      errorShownAt =
+        performance.now();
+
+
+      timeToTargetAoiMs =
+        null;
+
+
+      aoiEntryStartedAt =
+        null;
+
+
+      gazeMeasurementActive =
+        true;
+
+
+      showError();
+
+
+      continueButton.disabled =
+        true;
+
 
       continueButton.textContent =
-        'Подготовка айтрекинга...';
-
-
-      try {
-
-        /*
-         * Запись запускаем непосредственно
-         * перед появлением ошибки.
-         *
-         * Поэтому начало recording segment
-         * практически совпадает с error onset.
-         */
-        await tracker.startRecording();
-
-        recording = true;
-
-
-        errorShownAt =
-          performance.now();
-
-
-        showError();
-
-
-        continueButton.textContent =
-          'Найдите поле с ошибкой';
-
-
-      } catch (error) {
-
-        console.error(
-          'Could not start recording:',
-          error
-        );
-
-        continueButton.disabled = false;
-
-        continueButton.textContent =
-          'Продолжить';
-
-        alert(
-          'Не удалось начать запись взгляда.'
-        );
-
-      }
+        'Найдите поле с ошибкой';
 
     }
   );
@@ -342,12 +617,13 @@
           `.field-block[data-field="${currentTrial.target_field}"] .local-popover`
         );
 
+
       if (localError) {
+
         localError.classList.remove(
           'is-hidden'
         );
       }
-
     }
 
   }
@@ -355,10 +631,12 @@
 
 
   // ========================================
-  // PARTICIPANT CLICKS FIELD
+  // FIELD CLICK
   // ========================================
 
-  async function handleFieldClick(event) {
+  async function handleFieldClick(
+    event
+  ) {
 
     if (
       errorShownAt === null
@@ -369,6 +647,8 @@
 
 
     saved = true;
+
+    gazeMeasurementActive = false;
 
 
     const input =
@@ -389,46 +669,42 @@
 
     try {
 
-      // Сначала завершаем gaze segment.
-      if (recording) {
+      const response =
+        await fetch(
+          config.saveUrl,
+          {
+            method: 'POST',
 
-        await tracker.stopRecording();
+            headers: {
+              'Content-Type':
+                'application/json',
 
-        recording = false;
-      }
+              'X-CSRFToken':
+                getCookie(
+                  'csrftoken'
+                )
+            },
 
+            body: JSON.stringify({
 
-      // Затем сохраняем behavioural data.
-      const response = await fetch(
-        config.saveUrl,
-        {
-          method: 'POST',
+              trial_number:
+                currentTrial.trial_number,
 
-          headers: {
-            'Content-Type':
-              'application/json',
+              response_time_ms:
+                responseTime,
 
-            'X-CSRFToken':
-              getCookie('csrftoken')
-          },
+              time_to_target_aoi_ms:
+                timeToTargetAoiMs,
 
-          body: JSON.stringify({
-
-            trial_number:
-              currentTrial.trial_number,
-
-            response_time_ms:
-              responseTime,
-
-            clicked_correct_field:
-              correct
-
-          })
-        }
-      );
+              clicked_correct_field:
+                correct
+            })
+          }
+        );
 
 
       if (!response.ok) {
+
         throw new Error(
           'Save failed: '
           + response.status
@@ -440,7 +716,6 @@
         await response.json();
 
 
-      // Эксперимент закончен.
       if (data.finished) {
 
         await finishExperiment();
@@ -449,8 +724,6 @@
       }
 
 
-      // Следующая проба,
-      // без reload страницы.
       await startTrial(
         data.next_trial
       );
@@ -462,9 +735,11 @@
 
       saved = false;
 
+
       alert(
         'Не удалось сохранить пробу. ' +
-        'Откройте Console (F12) и пришлите ошибку.'
+        'Откройте Console (F12) ' +
+        'и пришлите ошибку.'
       );
 
     }
@@ -485,30 +760,14 @@
 
     try {
 
-      /*
-       * Ждём, пока все gaze predictions
-       * будут отправлены Chiasm.
-       */
-      await tracker.ensureAllPredictionsReturned();
+      webgazer.clearGazeListener();
+
+      webgazer.end();
 
     } catch (error) {
 
       console.warn(
-        'Prediction flush warning:',
-        error
-      );
-
-    }
-
-
-    try {
-
-      await tracker.cleanupTracker();
-
-    } catch (error) {
-
-      console.warn(
-        'Tracker cleanup warning:',
+        'WebGazer cleanup warning:',
         error
       );
 
@@ -522,28 +781,26 @@
 
 
   // ========================================
-  // AOI
+  // AOI HELPER
   // ========================================
 
-  /*
-   * Оставляем эту функцию:
-   * позже она позволит автоматически
-   * считать первое попадание взгляда
-   * в целевое поле.
-   */
-  window.getTargetAOI = function () {
+  window.getTargetAOI =
+    function () {
 
-    const target =
-      document.getElementById(
-        currentTrial.target_field
-      );
+      const target =
+        document.getElementById(
+          currentTrial.target_field
+        );
 
-    if (!target) {
-      return null;
-    }
 
-    return target.getBoundingClientRect();
-  };
+      if (!target) {
+        return null;
+      }
+
+
+      return target
+        .getBoundingClientRect();
+    };
 
 
 
@@ -558,6 +815,7 @@
         setTimeout(resolve, ms)
     );
   }
+
 
 
   function getCookie(name) {
@@ -585,9 +843,7 @@
             name.length + 1
           )
         );
-
       }
-
     }
 
 

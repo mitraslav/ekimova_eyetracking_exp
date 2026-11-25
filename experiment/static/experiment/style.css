@@ -192,3 +192,78 @@ button:disabled {
     color: #888;
     font-size: 13px;
 }
+
+/* -----------------------------
+   WebGazer calibration
+------------------------------ */
+
+.calibration-screen {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    background: #fff;
+}
+
+.calibration-info {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: min(420px, 70vw);
+    transform: translate(-50%, -50%);
+    text-align: center;
+}
+
+.calibration-info h2 {
+    margin-bottom: 10px;
+}
+
+.calibration-info p {
+    color: #555;
+    line-height: 1.4;
+}
+
+.calibration-point {
+    position: absolute;
+
+    width: 28px;
+    height: 28px;
+
+    padding: 0;
+
+    border: 0;
+    border-radius: 50%;
+
+    background: #1f2937;
+
+    transform: translate(-50%, -50%);
+
+    cursor: pointer;
+}
+
+.calibration-point[data-x="10"] {
+    left: 10%;
+}
+
+.calibration-point[data-x="50"] {
+    left: 50%;
+}
+
+.calibration-point[data-x="90"] {
+    left: 90%;
+}
+
+.calibration-point[data-y="10"] {
+    top: 10%;
+}
+
+.calibration-point[data-y="50"] {
+    top: 50%;
+}
+
+.calibration-point[data-y="90"] {
+    top: 90%;
+}
+
+.calibration-point.done {
+    visibility: hidden;
+}

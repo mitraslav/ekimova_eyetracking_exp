@@ -16,13 +16,94 @@
 
 <body class="locked">
 
-<!-- Нужен для CSRF-cookie -->
 <div style="display:none;">
   {% csrf_token %}
 </div>
 
 
-<!-- Фиксационный крест -->
+<!-- КАЛИБРОВКА -->
+
+<div
+  id="calibration-screen"
+  class="calibration-screen"
+>
+
+  <div class="calibration-info">
+
+    <h2>Калибровка айтрекинга</h2>
+
+    <p>
+      Разрешите доступ к камере.
+      Затем смотрите прямо на каждую точку
+      и нажмите на неё 3 раза.
+    </p>
+
+    <p id="calibration-status">
+      Подготовка камеры...
+    </p>
+
+  </div>
+
+
+  <button
+    class="calibration-point"
+    data-x="10"
+    data-y="10"
+  ></button>
+
+  <button
+    class="calibration-point"
+    data-x="50"
+    data-y="10"
+  ></button>
+
+  <button
+    class="calibration-point"
+    data-x="90"
+    data-y="10"
+  ></button>
+
+  <button
+    class="calibration-point"
+    data-x="10"
+    data-y="50"
+  ></button>
+
+  <button
+    class="calibration-point"
+    data-x="50"
+    data-y="50"
+  ></button>
+
+  <button
+    class="calibration-point"
+    data-x="90"
+    data-y="50"
+  ></button>
+
+  <button
+    class="calibration-point"
+    data-x="10"
+    data-y="90"
+  ></button>
+
+  <button
+    class="calibration-point"
+    data-x="50"
+    data-y="90"
+  ></button>
+
+  <button
+    class="calibration-point"
+    data-x="90"
+    data-y="90"
+  ></button>
+
+</div>
+
+
+<!-- ФИКСАЦИОННЫЙ КРЕСТ -->
+
 <div
   id="fixation-overlay"
   class="fixation-overlay is-hidden"
@@ -33,7 +114,8 @@
 </div>
 
 
-<!-- Основная страница trial -->
+<!-- TRIAL -->
+
 <div
   id="trial"
   class="page"
@@ -84,9 +166,8 @@
 </div>
 
 
-<!-- Финальный экран.
-     Он находится на той же странице,
-     поэтому tracker не уничтожается. -->
+<!-- ФИНАЛ -->
+
 <div
   id="finish-screen"
   class="page"
@@ -95,9 +176,7 @@
 
   <div class="card">
 
-    <h1>
-      Спасибо!
-    </h1>
+    <h1>Спасибо!</h1>
 
     <p>
       Эксперимент завершён.
@@ -108,7 +187,6 @@
 </div>
 
 
-<!-- Первая проба из Django -->
 {{ initial_trial|json_script:"initial-trial-data" }}
 
 
@@ -118,22 +196,15 @@ window.EXPERIMENT = {
     "{{ participant_id|escapejs }}",
 
   saveUrl:
-    "{% url 'experiment:save_result' %}",
-
-  chiasmToken:
-    "{{ chiasm_token|escapejs }}",
-
-  chiasmExperimentId:
-    "{{ chiasm_experiment_id|escapejs }}"
+    "{% url 'experiment:save_result' %}"
 };
 </script>
 
 
-<!-- Chiasm -->
-<script src="https://cdn.chiasm.eu/latest/chiasm-tracker.js"></script>
+<script
+  src="https://cdn.jsdelivr.net/npm/webgazer@3.5.3/dist/webgazer.min.js">
+</script>
 
-
-<!-- Наш эксперимент -->
 <script
   src="{% static 'experiment/trial.js' %}">
 </script>
