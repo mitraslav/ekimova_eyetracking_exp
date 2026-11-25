@@ -207,7 +207,7 @@ button:disabled {
 .calibration-info {
     position: absolute;
     left: 50%;
-    top: 50%;
+    top: 30%;
     width: min(420px, 70vw);
     transform: translate(-50%, -50%);
     text-align: center;
