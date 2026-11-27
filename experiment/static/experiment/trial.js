@@ -1,3 +1,4 @@
+
 (async function () {
   'use strict';
   const config = window.EXPERIMENT;
@@ -15,11 +16,14 @@
   const FIXATION_MIN_MS = 100;
   const AOI_MARGIN_PX = 8;
   const CALIBRATION_CLICKS = 5;
-  const CALIBRATION_DWELL_MS = 900;
-  const CALIBRATION_CLICK_INTERVAL_MS = 500;
+  const CALIBRATION_DWELL_MS = 1400;
+  const CALIBRATION_CLICK_INTERVAL_MS = 700;
+  const CALIBRATION_POINT_COUNT = 15;
   const VALIDATION_SETTLE_MS = 600;
   const VALIDATION_RECORD_MS = 1500;
-  const VALIDATION_POINTS = [[25,25],[75,25],[50,50],[25,75],[75,75]];
+  const VALIDATION_POINTS = [
+    [25,25],[75,25],[50,50],[25,75],[75,75]
+  ];
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const timeOrigin = performance.timeOrigin;
@@ -38,6 +42,8 @@
   let validationPanel = null;
   let calibrationAttempt = 0, calibrationHandler = null;
   let acceptedValidationRun = null;
+  let postValidationRun = null;
+  let postValidationStatus = 'not_started';
 
   const calibrationAttempts = [];
 
@@ -184,8 +190,8 @@
 
     if (state !== 'respond' || !active) return;
 
-    // Keep all callbacks, including failures and
-    // those AFTER the first AOI hit.
+    // Keep all callbacks, including failures
+    // and those AFTER the first AOI hit.
 
     const rect = box($(currentTrial.target_field));
 
@@ -232,14 +238,93 @@
   async function setupCalibrationPoints() {
     state = 'calibration_reset';
 
+    // Keep the original nine points;
+    // recreate six extra points on each attempt.
+
+    calibrationScreen
+      .querySelectorAll('[data-extra-calibration]')
+      .forEach(p=>p.remove());
+
     const points = [
-      ...document.querySelectorAll('.calibration-point')
+      ...calibrationScreen.querySelectorAll('.calibration-point')
     ];
 
     if (points.length !== 9)
       throw Error(
-        'Expected 9 calibration points, found '+points.length
+        'Expected 9 original calibration points, found '+points.length
       );
+
+    // Measure the actual form without exposing
+    // its contents through the calibration screen.
+
+    const formPoints = formValidationPoints();
+
+    const rows = formPoints.map(p=>p.reference_aoi);
+
+    const centers = [
+      rows[0].top+rows[0].height/2,
+      (
+        rows[1].top+rows[1].height/2+
+        rows[2].top+rows[2].height/2
+      )/2,
+      rows[3].top+rows[3].height/2
+    ];
+
+    for (const y of centers) {
+      for (const fraction of [.25,.75]) {
+
+        const x = rows[0].left + rows[0].width*fraction;
+
+        if(
+          x<14 ||
+          x>innerWidth-14 ||
+          y<14 ||
+          y>innerHeight-14
+        )
+          throw Error(
+            'Form calibration point is outside viewport'
+          );
+
+        const dot = document.createElement('button');
+
+        dot.type='button';
+        dot.className='calibration-point';
+        dot.dataset.extraCalibration='true';
+
+        dot.setAttribute(
+          'aria-label',
+          'Additional calibration point'
+        );
+
+        Object.assign(dot.style,{
+          position:'fixed',
+          left:`${x}px`,
+          top:`${y}px`,
+          right:'auto',
+          bottom:'auto',
+          transform:'translate(-50%,-50%)',
+          width:'24px',
+          height:'24px',
+          minWidth:'0',
+          minHeight:'0',
+          padding:'0',
+          margin:'0',
+          borderRadius:'50%',
+          border:'2px solid white',
+          background:'#c92735',
+          zIndex:'2147482000',
+          visibility:'hidden',
+          pointerEvents:'none'
+        });
+
+        calibrationScreen.append(dot);
+
+        points.push(dot);
+      }
+    }
+
+    if(points.length!==CALIBRATION_POINT_COUNT)
+      throw Error('Invalid calibration point count');
 
     // Reset the regression model for every attempt,
     // not merely the UI.
@@ -270,12 +355,14 @@
       attempt:calibrationAttempt,
       started_ms:performance.now(),
       viewport:viewport(),
-      quality_flags:[]
+      quality_flags:[],
+      point_count:points.length
     };
 
     calibrationAttempts.push(attempt);
 
     for (const point of points) {
+
       if (calibrationHandler)
         point.removeEventListener(
           'click',
@@ -298,6 +385,7 @@
       `${instruction} Точка ${index+1}/${points.length}. Нажатие ${count+1}/${CALIBRATION_CLICKS}.`;
 
     function arm(delay) {
+
       const own=++generation;
       const point=points[index];
 
@@ -309,10 +397,12 @@
         `${instruction} Точка ${index+1}/${points.length}: удерживайте взгляд...`;
 
       setTimeout(()=>{
+
         if(state!=='calibration'||own!==generation)
           return;
 
         point.style.pointerEvents='auto';
+
         calibrationStatus.textContent=readyText();
 
       },delay);
@@ -330,6 +420,7 @@
     }
 
     calibrationHandler=event=>{
+
       const now=performance.now();
 
       if(
@@ -341,6 +432,7 @@
       const point=event.currentTarget;
 
       const r=point.getBoundingClientRect();
+
       const x=r.left+r.width/2;
       const y=r.top+r.height/2;
 
@@ -349,6 +441,7 @@
       calibrationClicks.push({
         attempt:calibrationAttempt,
         point_index:index+1,
+        kind:index<9?'screen':'form',
         click_index:count+1,
         browser_time_ms:now,
         x,y,
@@ -391,6 +484,7 @@
   }
 
   async function finishCalibration() {
+
     calibrationScreen.style.display = 'none';
 
     webgazer.showVideo(false);
@@ -419,23 +513,44 @@
   }
 
   function formValidationPoints() {
+
     // Measure the real, pre-error form under
     // the opaque validation overlay.
     // The first trial is rendered again normally
     // when the experiment starts.
 
-    renderTrial(currentTrial);
+    const oldDisplay=trialPage.style.display;
+    const oldVisibility=trialPage.style.visibility;
+    const oldHidden=trialPage.hidden;
 
-    const rects=Array.from(
-      fieldsContainer.querySelectorAll('input')
-    ).map(box).sort((a,b)=>a.top-b.top);
+    let rects;
+
+    try {
+
+      trialPage.hidden=false;
+      trialPage.style.display='flex';
+      trialPage.style.visibility='hidden';
+
+      renderTrial(currentTrial);
+
+      rects=Array.from(
+        fieldsContainer.querySelectorAll('input')
+      ).map(box).sort((a,b)=>a.top-b.top);
+
+    } finally {
+
+      trialPage.hidden=oldHidden;
+      trialPage.style.display=oldDisplay;
+      trialPage.style.visibility=oldVisibility;
+    }
 
     if(
       rects.length!==4 ||
       rects.some(r=>!r||r.width<=0||r.height<=0)
-    )throw Error(
-      'Cannot measure four form fields for validation'
-    );
+    )
+      throw Error(
+        'Cannot measure four form fields for validation'
+      );
 
     return rects.map((r,i)=>({
       name:`Поле ${i+1} (сверху)`,
@@ -447,6 +562,7 @@
   }
 
   function validationCard(text) {
+
     validationPanel.replaceChildren();
 
     const card = document.createElement('div');
@@ -468,12 +584,14 @@
     p.textContent = text;
 
     card.append(p);
+
     validationPanel.append(card);
 
     return card;
   }
 
   function action(parent,text,callback) {
+
     const b = document.createElement('button');
 
     b.type='button';
@@ -497,6 +615,7 @@
   }
 
   function showValidationIntro() {
+
     state = 'validation_intro';
 
     const card = validationCard(
@@ -515,6 +634,7 @@
     : null;
 
   function summarize(point) {
+
     const good = point.samples.filter(s=>s.valid);
 
     const dx = good.map(s=>s.x-point.target_x);
@@ -533,32 +653,50 @@
 
     return {
       total_callbacks:point.samples.length,
+
       valid_callbacks:good.length,
+
       within_reference_aoi_count:inField,
+
       within_reference_aoi_fraction:r&&good.length
         ? inField/good.length
         : null,
+
       valid_fraction:point.samples.length
         ? good.length/point.samples.length
         : null,
+
       mean_error_px:mean(
         dx.map((x,i)=>Math.hypot(x,dy[i]))
       ),
+
       mean_dx_px:mean(dx),
+
       mean_dy_px:mean(dy)
     };
   }
 
-  async function runValidation() {
+  async function runValidation(phase='pre') {
+
+    const isPost=phase==='post';
+
     if(
-      state !== 'validation_intro' &&
-      state !== 'validation_summary'
+      isPost
+        ? state!=='post_validation_intro'
+        : (
+            state!=='validation_intro' &&
+            state!=='validation_summary'
+          )
     )return;
 
     state = 'validation';
 
+    if(isPost)
+      postValidationStatus='in_progress';
+
     const run = {
       attempt:calibrationAttempt,
+      phase,
       started_ms:performance.now(),
       viewport:viewport(),
       points:[]
@@ -584,12 +722,41 @@
       })
     );
 
-    const targets=[
-      ...screenPoints,
-      ...formValidationPoints()
-    ];
+    // For drift estimation reuse the EXACT
+    // accepted pre-validation coordinates,
+    // not the last trial's form.
+
+    const pre = validationRuns[acceptedValidationRun];
+
+    const targets=isPost
+      ? pre.points.map(p=>({
+          name:p.name,
+          kind:p.kind,
+          x:p.target_x,
+          y:p.target_y,
+          position_percent:p.position_percent,
+          reference_aoi:p.reference_aoi
+        }))
+      : [
+          ...screenPoints,
+          ...formValidationPoints()
+        ];
+
+    if(isPost) {
+
+      run.reference_validation_run_index=
+        acceptedValidationRun;
+
+      run.viewport_matches_pre=
+        JSON.stringify(run.viewport)===
+        JSON.stringify(pre.viewport);
+
+      if(!run.viewport_matches_pre)
+        flag('post_validation_viewport_changed');
+    }
 
     for(const target of targets) {
+
       validationPanel.replaceChildren();
 
       const dot = document.createElement('div');
@@ -614,13 +781,22 @@
       const point = {
         name:target.name,
         kind:target.kind,
+
         target_x:r.left+r.width/2,
         target_y:r.top+r.height/2,
-        position_percent:target.position_percent||null,
-        reference_aoi:target.reference_aoi||null,
+
+        position_percent:
+          target.position_percent||null,
+
+        reference_aoi:
+          target.reference_aoi||null,
+
         started_ms:performance.now(),
+
         viewport:viewport(),
+
         samples:[],
+
         quality_flags:[]
       };
 
@@ -633,6 +809,7 @@
       validationActive = null;
 
       point.ended_ms = performance.now();
+
       point.summary = summarize(point);
     }
 
@@ -650,11 +827,41 @@
     );
 
     run.screen_mean_error_px=groupMean('screen');
+
     run.form_mean_error_px=groupMean('form');
 
     const lines=run.points.map(
       p=>`${p.name}: ${fmt(p.summary.mean_error_px)} px; dy ${fmt(p.summary.mean_dy_px)} px; ${p.summary.valid_callbacks}/${p.summary.total_callbacks}${p.kind==='form'?'; в поле '+(p.summary.within_reference_aoi_fraction===null?'--':Math.round(100*p.summary.within_reference_aoi_fraction)+'%'):''}`
     );
+
+    if(isPost) {
+
+      postValidationRun=validationRuns.indexOf(run);
+
+      postValidationStatus='completed';
+
+      state='post_validation_summary';
+
+      const card=validationCard(
+        `Повторная проверка завершена.\nОшибка по экрану до / после: ${fmt(pre.screen_mean_error_px)} / ${fmt(run.screen_mean_error_px)} px.\nПо форме до / после: ${fmt(pre.form_mean_error_px)} / ${fmt(run.form_mean_error_px)} px.\n${lines.join('\n')}\n${run.viewport_matches_pre?'':'Размер окна изменился: сравнение ограничено.'}`
+      );
+
+      endStatus='completed';
+
+      action(
+        card,
+        'Скачать итоговый JSON',
+        downloadBackup
+      );
+
+      action(
+        card,
+        'Завершить',
+        finishExperiment
+      );
+
+      return;
+    }
 
     const card=validationCard(
       `Проверка ${calibrationAttempt} завершена.\nСредняя ошибка по точкам экрана: ${fmt(run.screen_mean_error_px)} px.\nПо точкам формы: ${fmt(run.form_mean_error_px)} px.\n\nОшибка; вертикальное смещение; числовые прогнозы:\n${lines.join('\n')}\n\nЕсли ошибка велика относительно высоты поля, повторите калибровку.`
@@ -678,6 +885,7 @@
     action(card,'Скачать JSON',downloadBackup);
 
     action(card,'Перейти к пробам',()=>{
+
       if(state!=='validation_summary')return;
 
       acceptedValidationRun=validationRuns.indexOf(run);
@@ -687,6 +895,7 @@
       state='fixation';
 
       validationPanel.remove();
+
       validationPanel=null;
 
       startTrial(currentTrial).catch(fail);
@@ -694,31 +903,38 @@
   }
 
   function renderTrial(trial) {
+
     currentTrial=trial;
 
     meta.textContent=
       `Проба ${trial.trial_number} из ${trial.total_trials}`;
 
     globalError.textContent=trial.error_message;
+
     globalError.classList.add('is-hidden');
 
     fieldsContainer.replaceChildren();
 
     for(const field of trial.fields) {
+
       const block=document.createElement('div');
 
       block.className='field-block';
+
       block.dataset.field=field.name;
 
       const label=document.createElement('label');
 
       label.htmlFor=field.name;
+
       label.textContent=field.label;
 
       const input=document.createElement('input');
 
       input.id=field.name;
+
       input.name=field.name;
+
       input.type=field.name==='password'
         ?'password'
         :'text';
@@ -728,9 +944,11 @@
       block.append(label,input);
 
       if(field.is_target && trial.condition==='local') {
+
         const e=document.createElement('div');
 
         e.className='error-popover local-popover is-hidden';
+
         e.textContent=trial.error_message;
 
         block.append(e);
@@ -742,15 +960,20 @@
     }
 
     continueButton.disabled=false;
+
     continueButton.textContent='Продолжить';
 
     active=null;
+
     pending=null;
+
     aoiEntryStartedAt=null;
+
     timeToTargetAoiMs=null;
   }
 
   async function startTrial(trial) {
+
     state='fixation';
 
     renderTrial(trial);
@@ -773,21 +996,32 @@
   }
 
   continueButton.addEventListener('click',()=>{
+
     if(state!=='ready')return;
 
     const errorTime=performance.now();
 
     active={
       trial_number:currentTrial.trial_number,
+
       condition:currentTrial.condition,
+
       target_field:currentTrial.target_field,
+
       target_position:currentTrial.target_position,
+
       stimulus:currentTrial,
+
       viewport:viewport(),
+
       error_onset_ms:errorTime,
+
       samples:[],
+
       aoi_history:[],
+
       quality_flags:[],
+
       lastGeometry:null
     };
 
@@ -800,6 +1034,7 @@
       )?.classList.remove('is-hidden');
 
     continueButton.disabled=true;
+
     continueButton.textContent='Найдите поле с ошибкой';
 
     state='respond';
@@ -810,6 +1045,7 @@
   });
 
   async function handleFieldClick(event) {
+
     if(state!=='respond'||!active)return;
 
     const now=performance.now();
@@ -824,15 +1060,19 @@
 
     pending={
       trial_number:currentTrial.trial_number,
+
       response_time_ms:Math.round(
         now-active.error_onset_ms
       ),
+
       time_to_target_aoi_ms:timeToTargetAoiMs,
+
       clicked_correct_field:
         clicked===currentTrial.target_field
     };
 
     active.click_ms=now;
+
     active.clicked_field=clicked;
 
     Object.assign(active,pending);
@@ -847,18 +1087,23 @@
   }
 
   async function sendTrial() {
+
     if(saveBusy||!pending)return;
 
     saveBusy=true;
+
     state='saving';
 
     try {
+
       const response=await fetch(config.saveUrl,{
         method:'POST',
+
         headers:{
           'Content-Type':'application/json',
           'X-CSRFToken':getCookie('csrftoken')
         },
+
         body:JSON.stringify(pending)
       });
 
@@ -873,13 +1118,16 @@
       active.server_saved=true;
 
       if(data.finished) {
-        finishExperiment();
+
+        startPostValidation();
+
         return;
       }
 
       await startTrial(data.next_trial);
 
     } catch(error) {
+
       console.error(error);
 
       state='save_failed';
@@ -890,11 +1138,13 @@
       showSaveFailure(error);
 
     } finally {
+
       saveBusy=false;
     }
   }
 
   function showSaveFailure(error) {
+
     const panel=document.createElement('div');
 
     Object.assign(panel.style,{
@@ -922,6 +1172,7 @@
     action(card,'Скачать JSON',downloadBackup);
 
     action(card,'Повторить отправку',()=>{
+
       if(saveBusy)return;
 
       panel.remove();
@@ -931,43 +1182,78 @@
   }
 
   function snapshot() {
+
     return {
-      schema_version:'webgazer-validation-v2',
+
+      schema_version:'webgazer-validation-v3',
+
       run_id:runId,
+
       participant_id:config.participantId??null,
+
       status:endStatus,
+
       time_origin_ms:timeOrigin,
+
       coordinate_space:'viewport_css_px',
+
       timestamp_note:
         'browser callback receipt time, not camera exposure time',
+
       kalman_filter:true,
+
       fixation_min_ms:FIXATION_MIN_MS,
+
       aoi_margin_px:AOI_MARGIN_PX,
+
       legacy_metric:true,
+
       initial_viewport:initialViewport,
+
       final_viewport:viewport(),
+
       quality_flags:sessionFlags,
+
       calibration_protocol:{
+
+        point_count:CALIBRATION_POINT_COUNT,
+
         clicks_per_point:CALIBRATION_CLICKS,
+
         initial_dwell_ms:CALIBRATION_DWELL_MS,
+
         min_click_interval_ms:
           CALIBRATION_CLICK_INTERVAL_MS
       },
+
       calibration_attempts:calibrationAttempts,
-      accepted_validation_run_index:acceptedValidationRun,
+
+      accepted_validation_run_index:
+        acceptedValidationRun,
+
+      post_validation_run_index:
+        postValidationRun,
+
+      post_validation_status:
+        postValidationStatus,
+
       calibration_clicks:calibrationClicks,
+
       validation_runs:validationRuns,
+
       records
     };
   }
 
   function downloadBackup() {
+
     const blob=new Blob(
       [JSON.stringify(snapshot(),null,2)],
       {type:'application/json'}
     );
 
     const url=URL.createObjectURL(blob);
+
     const a=document.createElement('a');
 
     a.href=url;
@@ -981,6 +1267,7 @@
     document.body.append(a);
 
     a.click();
+
     a.remove();
 
     setTimeout(()=>URL.revokeObjectURL(url),1000);
@@ -988,7 +1275,77 @@
 
   window.downloadWebGazerBackup=downloadBackup;
 
+  function startPostValidation() {
+
+    stopMonitor();
+
+    active=null;
+
+    pending=null;
+
+    state='post_validation_intro';
+
+    endStatus='trials_completed';
+
+    trialPage.style.visibility='hidden';
+
+    validationPanel=document.createElement('div');
+
+    Object.assign(validationPanel.style,{
+      position:'fixed',
+      inset:'0',
+      zIndex:'2147483000',
+      background:'#f8fafc',
+      color:'#172033',
+      fontFamily:'system-ui,sans-serif',
+      display:'flex',
+      alignItems:'center',
+      justifyContent:'center',
+      overflow:'auto'
+    });
+
+    document.body.append(validationPanel);
+
+    const card=validationCard(
+      'Все пробы сохранены.\nНе меняйте положение головы и размер окна. Посмотрите на девять точек ещё раз: это проверка точности после эксперимента, без нового обучения.'
+    );
+
+    action(
+      card,
+      'Начать итоговую проверку',
+      ()=>runValidation('post').catch(fail)
+    );
+
+    action(
+      card,
+      'Скачать резервный JSON',
+      downloadBackup
+    );
+
+    action(
+      card,
+      'Завершить без проверки',
+      ()=>{
+
+        if(state!=='post_validation_intro')
+          return;
+
+        postValidationStatus='skipped';
+
+        finishExperiment();
+      }
+    );
+  }
+
   function finishExperiment() {
+
+    if(validationPanel){
+
+      validationPanel.remove();
+
+      validationPanel=null;
+    }
+
     state='done';
 
     endStatus='completed';
@@ -996,6 +1353,7 @@
     stopMonitor();
 
     trialPage.style.display='none';
+
     finishScreen.style.display='flex';
 
     const holder=document.createElement('div');
@@ -1018,34 +1376,51 @@
     finishScreen.append(holder);
 
     try {
+
       webgazer.clearGazeListener();
 
-      Promise.resolve(webgazer.end()).catch(console.warn);
+      Promise.resolve(
+        webgazer.end()
+      ).catch(console.warn);
 
     } catch(e) {
+
       console.warn(e);
     }
   }
 
   function fail(error) {
+
     console.error(error);
 
     state='failed';
-    endStatus='failed';
+
+    if(postValidationStatus==='in_progress')
+      postValidationStatus='failed';
+
+    endStatus=
+      records.length===currentTrial.total_trials &&
+      records.every(r=>r.server_saved)
+        ? 'trials_completed'
+        : 'failed';
 
     stopMonitor();
 
     if(validationPanel){
+
       validationPanel.remove();
+
       validationPanel=null;
     }
 
     calibrationScreen.style.display='none';
+
     trialPage.style.display='none';
 
     overlay.classList.add('is-hidden');
 
     finishScreen.style.display='flex';
+
     finishScreen.replaceChildren();
 
     const card=document.createElement('div');
@@ -1057,18 +1432,24 @@
 
     action(card,'Скачать JSON',downloadBackup);
 
-    try{
+    try {
+
       webgazer.clearGazeListener();
 
-      Promise.resolve(webgazer.end()).catch(console.warn);
+      Promise.resolve(
+        webgazer.end()
+      ).catch(console.warn);
 
-    }catch(e){
+    } catch(e) {
+
       console.warn(e);
     }
   }
 
   function getCookie(name) {
+
     for(const raw of document.cookie.split(';')){
+
       const c=raw.trim();
 
       if(c.startsWith(name+'='))
@@ -1085,15 +1466,20 @@
     ||null;
 
   try {
+
     webgazer.params.faceMeshSolutionPath=
       'https://cdn.jsdelivr.net/npm/webgazer@3.5.3/dist/mediapipe/face_mesh';
 
     webgazer.saveDataAcrossSessions(false);
+
     webgazer.applyKalmanFilter(true);
+
     webgazer.showPredictionPoints(false);
 
     webgazer.showVideo(true);
+
     webgazer.showFaceOverlay(true);
+
     webgazer.showFaceFeedbackBox(true);
 
     webgazer.setGazeListener(handleGazePrediction);
@@ -1105,6 +1491,7 @@
     await setupCalibrationPoints();
 
   } catch(error) {
+
     console.error(error);
 
     calibrationStatus.textContent=
