@@ -416,3 +416,57 @@ button:disabled {
         height: 36px;
     }
 }
+
+/* ========================================
+   EXPERIMENT V3 — EXTRA LARGE INPUTS
+   ======================================== */
+
+#trial {
+    --experiment-input-height:
+        clamp(42px, calc((100vh - 400px) / 4), 88px);
+}
+
+/* Одинаковые размеры всех четырёх полей */
+
+#trial .field-block input {
+    width: 100%;
+    height: var(--experiment-input-height);
+    min-height: var(--experiment-input-height);
+    box-sizing: border-box;
+}
+
+/* Компактное расположение элементов */
+
+#trial .field-block {
+    margin-bottom: 8px;
+}
+
+#trial .field-block label {
+    margin-bottom: 5px;
+    line-height: 1.2;
+}
+
+#trial .form-card {
+    padding: 16px 28px;
+}
+
+#trial #continue {
+    height: 40px;
+}
+
+/* Адаптация под небольшие экраны */
+
+@media (max-height: 650px) {
+
+    #trial .form-card {
+        padding: 12px 20px;
+    }
+
+    #trial .field-block {
+        margin-bottom: 5px;
+    }
+
+    #trial .field-block label {
+        margin-bottom: 3px;
+    }
+}
