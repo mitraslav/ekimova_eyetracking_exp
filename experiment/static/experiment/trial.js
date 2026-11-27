@@ -1,678 +1,751 @@
 (async function () {
-
+  'use strict';
   const config = window.EXPERIMENT;
-
-  // ========================================
-  // DOM
-  // ========================================
-
-  const calibrationScreen =
-    document.getElementById('calibration-screen');
-
-  const calibrationStatus =
-    document.getElementById('calibration-status');
-
-  const trialPage =
-    document.getElementById('trial');
-
-  const finishScreen =
-    document.getElementById('finish-screen');
-
-  const overlay =
-    document.getElementById('fixation-overlay');
-
-  const fieldsContainer =
-    document.getElementById('fields-container');
-
-  const globalError =
-    document.getElementById('global-error');
-
-  const meta =
-    document.getElementById('trial-meta');
-
-  const continueButton =
-    document.getElementById('continue');
-
-
-  // ========================================
-  // СОСТОЯНИЕ ЭКСПЕРИМЕНТА
-  // ========================================
-
-  let currentTrial = JSON.parse(
-    document
-      .getElementById('initial-trial-data')
-      .textContent
-  );
-
-  let errorShownAt = null;
-  let saved = false;
-  let gazeMeasurementActive = false;
-  let timeToTargetAoiMs = null;
-
-  // Минимальная продолжительность
-  // устойчивого попадания взгляда в AOI.
+  const $ = id => document.getElementById(id);
+  const calibrationScreen = $('calibration-screen');
+  const calibrationStatus = $('calibration-status');
+  const trialPage = $('trial');
+  const finishScreen = $('finish-screen');
+  const overlay = $('fixation-overlay');
+  const fieldsContainer = $('fields-container');
+  const globalError = $('global-error');
+  const meta = $('trial-meta');
+  const continueButton = $('continue');
   const FIXATION_MIN_MS = 100;
+  const AOI_MARGIN_PX = 8;
+  const CALIBRATION_CLICKS = 5;
+  const VALIDATION_SETTLE_MS = 600;
+  const VALIDATION_RECORD_MS = 1500;
+  const VALIDATION_POINTS = [[25,25],[75,25],[50,50],[25,75],[75,75]];
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const timeOrigin = performance.timeOrigin;
+  const runId = globalThis.crypto?.randomUUID?.() || String(Date.now());
+  let currentTrial = JSON.parse($('initial-trial-data').textContent);
+  let state = 'calibration';
+  let active = null, validationActive = null, pending = null;
+  let aoiEntryStartedAt = null, timeToTargetAoiMs = null;
+  let validationRuns = [], calibrationClicks = [], records = [];
+  let raf = null, saveBusy = false;
+  const sessionFlags = [];
+  let endStatus = 'in_progress';
+  let validationPanel = null;
 
-  let aoiEntryStartedAt = null;
-
-
-  // ========================================
-  // ИНИЦИАЛИЗАЦИЯ WEBGAZER
-  // ========================================
-
-  try {
-
-    // Путь к модели распознавания лица MediaPipe.
-    webgazer.params.faceMeshSolutionPath =
-      "https://cdn.jsdelivr.net/npm/webgazer@3.5.3/dist/mediapipe/face_mesh";
-
-    // Не используем калибровку предыдущих участников.
-    webgazer.saveDataAcrossSessions(false);
-
-    webgazer.applyKalmanFilter(true);
-
-    webgazer.showPredictionPoints(false);
-
-    webgazer.showVideo(true);
-
-    webgazer.showFaceOverlay(true);
-
-    webgazer.showFaceFeedbackBox(true);
-
-    webgazer.setGazeListener(
-      handleGazePrediction
-    );
-
-    await webgazer.begin();
-
-    // Отключаем автоматическое обучение
-    // на обычных кликах мыши.
-    webgazer.removeMouseEventListeners();
-
-    calibrationStatus.textContent =
-      'Смотрите на каждую точку и нажмите её 3 раза.';
-
-    setupCalibrationPoints();
-
-  } catch (error) {
-
-    console.error(
-      'WebGazer initialization error:',
-      error
-    );
-
-    // Показываем настоящую причину ошибки.
-    calibrationStatus.textContent =
-      'Ошибка запуска WebGazer: ' +
-      (error?.message || String(error));
-
+  function viewport() {
+    return {width:innerWidth,height:innerHeight,devicePixelRatio:window.devicePixelRatio,
+      scrollX:window.scrollX,scrollY:window.scrollY,
+      screenWidth:screen.width,screenHeight:screen.height,
+      visualViewport:window.visualViewport ? {width:visualViewport.width,height:visualViewport.height,
+        scale:visualViewport.scale,offsetLeft:visualViewport.offsetLeft,offsetTop:visualViewport.offsetTop}:null};
   }
 
+  const initialViewport = viewport();
 
-  // ========================================
-  // КАЛИБРОВКА
-  // ========================================
+  function box(element) {
+    if (!element) return null;
+    const r = element.getBoundingClientRect();
+    return {left:r.left,top:r.top,right:r.right,bottom:r.bottom,width:r.width,height:r.height};
+  }
+
+  function geometry() {
+    const allFields = {};
+    for (const field of currentTrial.fields) {
+      const input = $(field.name);
+      allFields[field.name] = {input:box(input),label:box(input?.parentElement?.querySelector('label'))};
+    }
+    const message = currentTrial.condition === 'global' ? globalError : fieldsContainer.querySelector('.local-popover');
+    return {fields:allFields,target:allFields[currentTrial.target_field]?.input || null,
+      message:box(message),button:box(continueButton),form:box(trialPage.querySelector('.form-card'))};
+  }
+
+  function captureGeometry(now) {
+    if (!active) return;
+    const g = geometry();
+    const signature = JSON.stringify(g);
+    if (signature !== active.lastGeometry) {
+      active.aoi_history.push({browser_time_ms:now,...g});
+      active.lastGeometry = signature;
+    }
+  }
+
+  function monitorGeometry() {
+    if (state !== 'respond') return;
+    captureGeometry(performance.now());
+    raf = requestAnimationFrame(monitorGeometry);
+  }
+
+  function stopMonitor() {
+    if (raf !== null) cancelAnimationFrame(raf);
+    raf = null;
+  }
+
+  function flag(value) {
+    if (!sessionFlags.includes(value)) sessionFlags.push(value);
+    if (active && !active.quality_flags.includes(value)) active.quality_flags.push(value);
+    if (validationActive && !validationActive.quality_flags.includes(value)) validationActive.quality_flags.push(value);
+  }
+
+  window.addEventListener('resize',()=>flag('viewport_resized'));
+  window.addEventListener('scroll',()=>flag('viewport_scrolled'));
+  window.addEventListener('blur',()=>flag('window_blurred'));
+  document.addEventListener('visibilitychange',()=>{if(document.hidden)flag('tab_hidden');});
+
+  // Coordinates are viewport CSS pixels; callback time is NOT a camera exposure timestamp.
+  function handleGazePrediction(data, elapsedTime) {
+    const now = performance.now();
+    const valid = !!data && Number.isFinite(data.x) && Number.isFinite(data.y);
+    const sample = {browser_time_ms:now,webgazer_elapsed_ms:Number.isFinite(elapsedTime)?elapsedTime:null,
+      x:valid?data.x:null,y:valid?data.y:null,valid};
+
+    if (state === 'validation' && validationActive) {
+      validationActive.samples.push(sample);
+      return;
+    }
+
+    if (state !== 'respond' || !active) return;
+
+    // Keep all callbacks, including failures and those AFTER the first AOI hit.
+    const rect = box($(currentTrial.target_field));
+    const inside = valid && !!rect && sample.x >= rect.left-AOI_MARGIN_PX && sample.x <= rect.right+AOI_MARGIN_PX &&
+      sample.y >= rect.top-AOI_MARGIN_PX && sample.y <= rect.bottom+AOI_MARGIN_PX;
+
+    active.samples.push({...sample,t_from_error_ms:now-active.error_onset_ms,
+      target_aoi:rect,inside_target_with_margin:inside});
+
+    // Preserve the historical 100 ms / 8 px metric for comparison with earlier pilots.
+    // As in the old script, null callbacks do not reset this legacy estimate.
+    // A stricter gap-aware metric can be recalculated from the exported callbacks.
+    if (!valid || !rect || timeToTargetAoiMs !== null) return;
+    if (!inside) { aoiEntryStartedAt = null; return; }
+    if (aoiEntryStartedAt === null) { aoiEntryStartedAt = now; return; }
+
+    if (now-aoiEntryStartedAt >= FIXATION_MIN_MS) {
+      timeToTargetAoiMs = Math.round(aoiEntryStartedAt-active.error_onset_ms);
+    }
+  }
 
   function setupCalibrationPoints() {
+    const points = [...document.querySelectorAll('.calibration-point')];
+    if (!points.length) throw Error('Calibration points not found');
 
-    const points = document.querySelectorAll(
-      '.calibration-point'
-    );
+    let finished = 0;
 
-    let finishedPoints = 0;
+    calibrationStatus.textContent = 'Смотрите на каждую точку и нажмите её 5 раз, не спеша.';
 
-    points.forEach(point => {
+    for (const point of points) {
+      let count = 0, last = -Infinity;
 
-      let clickCount = 0;
+      point.addEventListener('click',()=>{
+        const now = performance.now();
 
-      point.addEventListener('click', () => {
+        if(state !== 'calibration' || count >= CALIBRATION_CLICKS || now-last < 250) return;
 
-        const rect =
-          point.getBoundingClientRect();
+        last = now;
 
-        const x =
-          rect.left + rect.width / 2;
+        const r = point.getBoundingClientRect(), x = r.left+r.width/2, y = r.top+r.height/2;
 
-        const y =
-          rect.top + rect.height / 2;
+        webgazer.recordScreenPosition(x,y,'click');
 
-        // Передаём WebGazer координаты
-        // калибровочной точки.
-        webgazer.recordScreenPosition(
-          x,
-          y,
-          'click'
-        );
+        calibrationClicks.push({browser_time_ms:now,x,y,viewport:viewport()});
 
-        clickCount += 1;
+        count++;
 
-        // Визуально показываем прогресс.
-        point.style.opacity = String(
-          Math.max(
-            0.25,
-            1 - clickCount * 0.25
-          )
-        );
+        point.style.opacity = String(Math.max(.25,1-count*.14));
 
-        if (clickCount >= 3) {
-
+        if(count === CALIBRATION_CLICKS) {
           point.classList.add('done');
+          point.style.pointerEvents = 'none';
 
-          finishedPoints += 1;
+          finished++;
 
-          if (finishedPoints === points.length) {
-
-            finishCalibration();
-
+          if(finished === points.length) {
+            state = 'validation_intro';
+            finishCalibration().catch(fail);
           }
-
         }
-
       });
-
-    });
-
+    }
   }
-
-
-  // ========================================
-  // ЗАВЕРШЕНИЕ КАЛИБРОВКИ
-  // ========================================
 
   async function finishCalibration() {
+    calibrationScreen.style.display = 'none';
 
-    calibrationStatus.textContent =
-      'Калибровка завершена.';
-
-    await sleep(500);
-
-    calibrationScreen.style.display =
-      'none';
-
-    // Скрываем изображение с камеры,
-    // но продолжаем отслеживать взгляд.
     webgazer.showVideo(false);
-
     webgazer.showFaceOverlay(false);
-
     webgazer.showFaceFeedbackBox(false);
-
     webgazer.showPredictionPoints(false);
 
-    await startTrial(currentTrial);
+    validationPanel = document.createElement('div');
 
+    Object.assign(validationPanel.style,{
+      position:'fixed',
+      inset:'0',
+      zIndex:'2147483000',
+      background:'#f8fafc',
+      color:'#172033',
+      fontFamily:'system-ui,sans-serif',
+      display:'flex',
+      alignItems:'center',
+      justifyContent:'center'
+    });
+
+    document.body.append(validationPanel);
+
+    showValidationIntro();
   }
 
+  function validationCard(text) {
+    validationPanel.replaceChildren();
 
-  // ========================================
-  // ОТСЛЕЖИВАНИЕ ВЗГЛЯДА
-  // ========================================
+    const card = document.createElement('div');
 
-  function handleGazePrediction(
-    data,
-    elapsedTime
-  ) {
+    Object.assign(card.style,{
+      width:'min(620px,90vw)',
+      padding:'20px',
+      textAlign:'center',
+      whiteSpace:'pre-line'
+    });
 
-    if (!data) {
-      return;
-    }
+    const p = document.createElement('p');
 
-    // Измерение начинается только
-    // после появления сообщения об ошибке.
-    if (
-      !gazeMeasurementActive
-      || errorShownAt === null
-      || timeToTargetAoiMs !== null
-    ) {
-      return;
-    }
+    p.textContent = text;
 
-    const target = document.getElementById(
-      currentTrial.target_field
+    card.append(p);
+    validationPanel.append(card);
+
+    return card;
+  }
+
+  function action(parent,text,callback) {
+    const b = document.createElement('button');
+
+    b.type='button';
+    b.textContent=text;
+
+    Object.assign(b.style,{
+      margin:'8px',
+      padding:'10px 16px',
+      cursor:'pointer'
+    });
+
+    b.addEventListener('click',callback);
+
+    parent.append(b);
+
+    return b;
+  }
+
+  function showValidationIntro() {
+    state = 'validation_intro';
+
+    const card = validationCard(
+      'Проверка калибровки.\nСмотрите на центр каждой точки, не нажимая на неё. Точки сами сменят друг друга.'
     );
 
-    if (!target) {
-      return;
-    }
-
-    const rect =
-      target.getBoundingClientRect();
-
-    // Запас AOI: 8 пикселей.
-    const margin = 8;
-
-    const inside =
-      data.x >= rect.left - margin
-      && data.x <= rect.right + margin
-      && data.y >= rect.top - margin
-      && data.y <= rect.bottom + margin;
-
-    const now = performance.now();
-
-    if (inside) {
-
-      // Первое попадание взгляда в AOI.
-      if (aoiEntryStartedAt === null) {
-
-        aoiEntryStartedAt = now;
-
-        return;
-
-      }
-
-      // Устойчивое попадание взгляда:
-      // не менее 100 мс внутри AOI.
-      if (
-        now - aoiEntryStartedAt
-        >= FIXATION_MIN_MS
-      ) {
-
-        timeToTargetAoiMs = Math.round(
-          aoiEntryStartedAt - errorShownAt
-        );
-
-        gazeMeasurementActive = false;
-
-        console.log(
-          'Target AOI fixation:',
-          timeToTargetAoiMs,
-          'ms'
-        );
-
-      }
-
-    } else {
-
-      // Если взгляд вышел из AOI раньше,
-      // начинаем отсчёт заново.
-      aoiEntryStartedAt = null;
-
-    }
-
+    action(card,'Начать проверку',()=>runValidation().catch(fail));
   }
 
+  const mean = a => a.length ? a.reduce((s,v)=>s+v,0)/a.length : null;
 
-  // ========================================
-  // СОЗДАНИЕ ИНТЕРФЕЙСА ПРОБЫ
-  // ========================================
+  function summarize(point) {
+    const good = point.samples.filter(s=>s.valid);
+
+    const dx = good.map(s=>s.x-point.target_x);
+    const dy = good.map(s=>s.y-point.target_y);
+
+    return {
+      total_callbacks:point.samples.length,
+      valid_callbacks:good.length,
+      valid_fraction:point.samples.length?good.length/point.samples.length:null,
+      mean_error_px:mean(dx.map((x,i)=>Math.hypot(x,dy[i]))),
+      mean_dx_px:mean(dx),
+      mean_dy_px:mean(dy)
+    };
+  }
+
+  async function runValidation() {
+    if(state !== 'validation_intro' && state !== 'validation_summary') return;
+
+    state = 'validation';
+
+    const run = {
+      started_ms:performance.now(),
+      viewport:viewport(),
+      points:[]
+    };
+
+    validationRuns.push(run);
+
+    for(const [x,y] of VALIDATION_POINTS) {
+      validationPanel.replaceChildren();
+
+      const dot = document.createElement('div');
+
+      Object.assign(dot.style,{
+        position:'absolute',
+        left:`${x}%`,
+        top:`${y}%`,
+        width:'18px',
+        height:'18px',
+        borderRadius:'50%',
+        background:'#c92735',
+        transform:'translate(-50%,-50%)'
+      });
+
+      validationPanel.append(dot);
+
+      await sleep(VALIDATION_SETTLE_MS);
+
+      const r = dot.getBoundingClientRect();
+
+      const point = {
+        target_x:r.left+r.width/2,
+        target_y:r.top+r.height/2,
+        position_percent:[x,y],
+        started_ms:performance.now(),
+        viewport:viewport(),
+        samples:[],
+        quality_flags:[]
+      };
+
+      run.points.push(point);
+      validationActive = point;
+
+      await sleep(VALIDATION_RECORD_MS);
+
+      validationActive = null;
+
+      point.ended_ms = performance.now();
+      point.summary = summarize(point);
+    }
+
+    run.ended_ms = performance.now();
+
+    state = 'validation_summary';
+
+    const fmt = n=>n===null?'--':n.toFixed(1);
+
+    const names=[
+      'Верх слева',
+      'Верх справа',
+      'Центр',
+      'Низ слева',
+      'Низ справа'
+    ];
+
+    const lines=run.points.map((p,i)=>
+      `${names[i]}: ${fmt(p.summary.mean_error_px)} px; dy ${fmt(p.summary.mean_dy_px)} px; ${p.summary.valid_callbacks}/${p.summary.total_callbacks}`
+    );
+
+    const card=validationCard(
+      'Проверка завершена.\nСредняя ошибка, вертикальное смещение, валидные прогнозы:\n\n'+lines.join('\n')
+    );
+
+    action(card,'Повторить проверку',()=>runValidation().catch(fail));
+
+    action(card,'Скачать JSON',downloadBackup);
+
+    action(card,'Перейти к пробам',()=>{
+      if(state!=='validation_summary')return;
+
+      state='fixation';
+
+      validationPanel.remove();
+      validationPanel=null;
+
+      startTrial(currentTrial).catch(fail);
+    });
+  }
 
   function renderTrial(trial) {
+    currentTrial=trial;
 
-    currentTrial = trial;
+    meta.textContent=`Проба ${trial.trial_number} из ${trial.total_trials}`;
 
-    meta.textContent =
-      `Проба ${trial.trial_number} ` +
-      `из ${trial.total_trials}`;
-
-    globalError.textContent =
-      trial.error_message;
+    globalError.textContent=trial.error_message;
 
     globalError.classList.add('is-hidden');
 
-    fieldsContainer.innerHTML = '';
+    fieldsContainer.replaceChildren();
 
-    trial.fields.forEach(field => {
+    for(const field of trial.fields) {
+      const block=document.createElement('div');
 
-      const block =
-        document.createElement('div');
+      block.className='field-block';
+      block.dataset.field=field.name;
 
-      block.className = 'field-block';
+      const label=document.createElement('label');
 
-      block.dataset.field = field.name;
+      label.htmlFor=field.name;
+      label.textContent=field.label;
 
-      const label =
-        document.createElement('label');
+      const input=document.createElement('input');
 
-      label.htmlFor = field.name;
+      input.id=field.name;
+      input.name=field.name;
+      input.type=field.name==='password'?'password':'text';
+      input.value=field.value;
 
-      label.textContent = field.label;
+      block.append(label,input);
 
-      const input =
-        document.createElement('input');
+      if(field.is_target && trial.condition==='local') {
+        const e=document.createElement('div');
 
-      input.id = field.name;
+        e.className='error-popover local-popover is-hidden';
+        e.textContent=trial.error_message;
 
-      input.name = field.name;
-
-      input.type =
-        field.name === 'password'
-          ? 'password'
-          : 'text';
-
-      input.value = field.value;
-
-      block.appendChild(label);
-
-      block.appendChild(input);
-
-      // Локальное сообщение об ошибке.
-      if (
-        field.is_target
-        && trial.condition === 'local'
-      ) {
-
-        const localError =
-          document.createElement('div');
-
-        localError.className =
-          'error-popover ' +
-          'local-popover ' +
-          'is-hidden';
-
-        localError.textContent =
-          trial.error_message;
-
-        block.appendChild(localError);
-
+        block.append(e);
       }
 
-      fieldsContainer.appendChild(block);
+      fieldsContainer.append(block);
 
-      input.addEventListener(
-        'click',
-        handleFieldClick
-      );
+      input.addEventListener('click',handleFieldClick);
+    }
 
-    });
+    continueButton.disabled=false;
+    continueButton.textContent='Продолжить';
 
-    // Восстанавливаем кнопку.
-    continueButton.disabled = false;
-
-    continueButton.textContent =
-      'Продолжить';
-
-    // Сбрасываем показатели предыдущей пробы.
-    errorShownAt = null;
-
-    saved = false;
-
-    gazeMeasurementActive = false;
-
-    timeToTargetAoiMs = null;
-
-    aoiEntryStartedAt = null;
-
+    active=null;
+    pending=null;
+    aoiEntryStartedAt=null;
+    timeToTargetAoiMs=null;
   }
 
-
-  // ========================================
-  // НАЧАЛО ПРОБЫ
-  // ========================================
-
   async function startTrial(trial) {
+    state='fixation';
 
     renderTrial(trial);
 
-    trialPage.style.visibility =
-      'hidden';
+    trialPage.style.visibility='hidden';
 
     overlay.classList.remove('is-hidden');
 
     document.body.classList.add('locked');
 
-    // Фиксационный крест: 1 секунда.
     await sleep(1000);
 
     overlay.classList.add('is-hidden');
 
-    trialPage.style.visibility =
-      'visible';
+    trialPage.style.visibility='visible';
 
     document.body.classList.remove('locked');
 
+    state='ready';
   }
 
+  continueButton.addEventListener('click',()=>{
+    if(state!=='ready')return;
 
-  // ========================================
-  // НАЖАТИЕ КНОПКИ «ПРОДОЛЖИТЬ»
-  // ========================================
+    const errorTime=performance.now();
 
-  continueButton.addEventListener(
-    'click',
-    () => {
+    active={
+      trial_number:currentTrial.trial_number,
+      condition:currentTrial.condition,
+      target_field:currentTrial.target_field,
+      target_position:currentTrial.target_position,
+      stimulus:currentTrial,
+      viewport:viewport(),
+      error_onset_ms:errorTime,
+      samples:[],
+      aoi_history:[],
+      quality_flags:[],
+      lastGeometry:null
+    };
 
-      if (errorShownAt !== null) {
-        return;
-      }
+    if(currentTrial.condition==='global')
+      globalError.classList.remove('is-hidden');
+    else
+      fieldsContainer.querySelector('.local-popover')?.classList.remove('is-hidden');
 
-      // Начало измерения времени реакции
-      // и времени до попадания взгляда в AOI.
-      errorShownAt = performance.now();
+    continueButton.disabled=true;
+    continueButton.textContent='Найдите поле с ошибкой';
 
-      timeToTargetAoiMs = null;
+    state='respond';
 
-      aoiEntryStartedAt = null;
+    captureGeometry(performance.now());
 
-      gazeMeasurementActive = true;
-
-      showError();
-
-      continueButton.disabled = true;
-
-      continueButton.textContent =
-        'Найдите поле с ошибкой';
-
-    }
-  );
-
-
-  // ========================================
-  // ПОКАЗ СООБЩЕНИЯ ОБ ОШИБКЕ
-  // ========================================
-
-  function showError() {
-
-    if (currentTrial.condition === 'global') {
-
-      globalError.classList.remove(
-        'is-hidden'
-      );
-
-    } else {
-
-      const localError = document.querySelector(
-        `.field-block[data-field="${currentTrial.target_field}"] .local-popover`
-      );
-
-      if (localError) {
-
-        localError.classList.remove(
-          'is-hidden'
-        );
-
-      }
-
-    }
-
-  }
-
-
-  // ========================================
-  // НАЖАТИЕ НА ПОЛЕ
-  // ========================================
+    raf=requestAnimationFrame(monitorGeometry);
+  });
 
   async function handleFieldClick(event) {
+    if(state!=='respond'||!active)return;
 
-    if (
-      errorShownAt === null
-      || saved
-    ) {
-      return;
-    }
+    const now=performance.now();
 
-    saved = true;
+    state='saving';
 
-    gazeMeasurementActive = false;
+    stopMonitor();
 
-    const input = event.currentTarget;
+    captureGeometry(now);
 
-    const responseTime = Math.round(
-      performance.now() - errorShownAt
-    );
+    const clicked=event.currentTarget.id;
 
-    const correct =
-      input.id === currentTrial.target_field;
+    pending={
+      trial_number:currentTrial.trial_number,
+      response_time_ms:Math.round(now-active.error_onset_ms),
+      time_to_target_aoi_ms:timeToTargetAoiMs,
+      clicked_correct_field:clicked===currentTrial.target_field
+    };
+
+    active.click_ms=now;
+    active.clicked_field=clicked;
+
+    Object.assign(active,pending);
+
+    active.server_saved=false;
+
+    delete active.lastGeometry;
+
+    records.push(active);
+
+    await sendTrial();
+  }
+
+  async function sendTrial() {
+    if(saveBusy||!pending)return;
+
+    saveBusy=true;
+    state='saving';
 
     try {
+      const response=await fetch(config.saveUrl,{
+        method:'POST',
+        headers:{
+          'Content-Type':'application/json',
+          'X-CSRFToken':getCookie('csrftoken')
+        },
+        body:JSON.stringify(pending)
+      });
 
-      // Сохраняем результаты в Django.
-      const response = await fetch(
-        config.saveUrl,
-        {
+      if(!response.ok)
+        throw Error('Save failed: '+response.status);
 
-          method: 'POST',
+      const data=await response.json();
 
-          headers: {
+      if(!data.finished&&!data.next_trial)
+        throw Error('Invalid server response');
 
-            'Content-Type':
-              'application/json',
+      active.server_saved=true;
 
-            'X-CSRFToken':
-              getCookie('csrftoken')
-
-          },
-
-          body: JSON.stringify({
-
-            trial_number:
-              currentTrial.trial_number,
-
-            response_time_ms:
-              responseTime,
-
-            time_to_target_aoi_ms:
-              timeToTargetAoiMs,
-
-            clicked_correct_field:
-              correct
-
-          })
-
-        }
-      );
-
-      if (!response.ok) {
-
-        throw new Error(
-          'Save failed: ' + response.status
-        );
-
-      }
-
-      const data = await response.json();
-
-      // Если завершена последняя проба.
-      if (data.finished) {
-
-        await finishExperiment();
-
+      if(data.finished) {
+        finishExperiment();
         return;
-
       }
 
-      // Переходим к следующей пробе
-      // без перезагрузки страницы.
       await startTrial(data.next_trial);
 
-    } catch (error) {
-
+    } catch(error) {
       console.error(error);
 
-      saved = false;
+      state='save_failed';
 
-      alert(
-        'Не удалось сохранить пробу. ' +
-        'Откройте Console (F12) ' +
-        'и пришлите ошибку.'
-      );
+      // Never re-measure a response after a failed request.
+      showSaveFailure(error);
 
+    } finally {
+      saveBusy=false;
     }
-
   }
 
+  function showSaveFailure(error) {
+    const panel=document.createElement('div');
 
-  // ========================================
-  // ЗАВЕРШЕНИЕ ЭКСПЕРИМЕНТА
-  // ========================================
+    Object.assign(panel.style,{
+      position:'fixed',
+      inset:'0',
+      zIndex:'2147483001',
+      background:'#fff',
+      color:'#222',
+      display:'flex',
+      alignItems:'center',
+      justifyContent:'center'
+    });
 
-  async function finishExperiment() {
+    const card=document.createElement('div');
 
-    trialPage.style.display = 'none';
+    card.style.padding='24px';
+
+    card.textContent='Ошибка сохранения: '+error.message;
+
+    panel.append(card);
+    document.body.append(panel);
+
+    action(card,'Скачать JSON',downloadBackup);
+
+    action(card,'Повторить отправку',()=>{
+      if(saveBusy)return;
+
+      panel.remove();
+
+      sendTrial();
+    });
+  }
+
+  function snapshot() {
+    return {
+      schema_version:'webgazer-validation-v1',
+      run_id:runId,
+      participant_id:config.participantId??null,
+      status:endStatus,
+      time_origin_ms:timeOrigin,
+      coordinate_space:'viewport_css_px',
+      timestamp_note:'browser callback receipt time, not camera exposure time',
+      kalman_filter:true,
+      fixation_min_ms:FIXATION_MIN_MS,
+      aoi_margin_px:AOI_MARGIN_PX,
+      legacy_metric:true,
+      initial_viewport:initialViewport,
+      final_viewport:viewport(),
+      quality_flags:sessionFlags,
+      calibration_clicks:calibrationClicks,
+      validation_runs:validationRuns,
+      records
+    };
+  }
+
+  function downloadBackup() {
+    const blob=new Blob(
+      [JSON.stringify(snapshot(),null,2)],
+      {type:'application/json'}
+    );
+
+    const url=URL.createObjectURL(blob);
+
+    const a=document.createElement('a');
+
+    a.href=url;
+
+    const pid=String(config.participantId??'participant')
+      .replace(/[^a-zA-Z0-9_-]/g,'_');
+
+    a.download=`webgazer_${pid}_${runId}.json`;
+
+    document.body.append(a);
+
+    a.click();
+    a.remove();
+
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }
+
+  window.downloadWebGazerBackup=downloadBackup;
+
+  function finishExperiment() {
+    state='done';
+
+    endStatus='completed';
+
+    stopMonitor();
+
+    trialPage.style.display='none';
+
+    finishScreen.style.display='flex';
+
+    const holder=document.createElement('div');
+
+    holder.style.textAlign='center';
+
+    const note=document.createElement('p');
+
+    note.textContent='Скачайте JSON перед закрытием страницы.';
+
+    holder.append(note);
+
+    action(
+      holder,
+      'Скачать исходные данные JSON',
+      downloadBackup
+    );
+
+    finishScreen.append(holder);
 
     try {
-
       webgazer.clearGazeListener();
 
-      webgazer.end();
+      Promise.resolve(webgazer.end()).catch(console.warn);
 
-    } catch (error) {
-
-      console.warn(
-        'WebGazer cleanup warning:',
-        error
-      );
-
+    } catch(e) {
+      console.warn(e);
     }
-
-    finishScreen.style.display = 'flex';
-
   }
 
+  function fail(error) {
+    console.error(error);
 
-  // ========================================
-  // ПОЛУЧЕНИЕ КООРДИНАТ AOI
-  // ========================================
+    state='failed';
+    endStatus='failed';
 
-  window.getTargetAOI = function () {
+    stopMonitor();
 
-    const target = document.getElementById(
-      currentTrial.target_field
-    );
-
-    if (!target) {
-      return null;
+    if(validationPanel){
+      validationPanel.remove();
+      validationPanel=null;
     }
 
-    return target.getBoundingClientRect();
+    calibrationScreen.style.display='none';
+    trialPage.style.display='none';
 
-  };
+    overlay.classList.add('is-hidden');
 
+    finishScreen.style.display='flex';
 
-  // ========================================
-  // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-  // ========================================
+    finishScreen.replaceChildren();
 
-  function sleep(ms) {
+    const card=document.createElement('div');
 
-    return new Promise(
-      resolve => setTimeout(resolve, ms)
-    );
+    card.textContent='Эксперимент прерван: '+error.message;
 
+    finishScreen.append(card);
+
+    action(card,'Скачать JSON',downloadBackup);
+
+    try{
+      webgazer.clearGazeListener();
+
+      Promise.resolve(webgazer.end()).catch(console.warn);
+
+    }catch(e){
+      console.warn(e);
+    }
   }
-
 
   function getCookie(name) {
+    for(const raw of document.cookie.split(';')){
+      const c=raw.trim();
 
-    const parts = document.cookie
-      ? document.cookie.split(';')
-      : [];
-
-    for (const raw of parts) {
-
-      const cookie = raw.trim();
-
-      if (cookie.startsWith(name + '=')) {
-
-        return decodeURIComponent(
-          cookie.substring(name.length + 1)
-        );
-
-      }
-
+      if(c.startsWith(name+'='))
+        return decodeURIComponent(c.substring(name.length+1));
     }
 
     return null;
-
   }
 
+  window.getTargetAOI=()=>
+    $(currentTrial.target_field)?.getBoundingClientRect()||null;
+
+  try {
+    webgazer.params.faceMeshSolutionPath=
+      'https://cdn.jsdelivr.net/npm/webgazer@3.5.3/dist/mediapipe/face_mesh';
+
+    webgazer.saveDataAcrossSessions(false);
+    webgazer.applyKalmanFilter(true);
+    webgazer.showPredictionPoints(false);
+
+    webgazer.showVideo(true);
+    webgazer.showFaceOverlay(true);
+    webgazer.showFaceFeedbackBox(true);
+
+    webgazer.setGazeListener(handleGazePrediction);
+
+    await webgazer.begin();
+
+    webgazer.removeMouseEventListeners();
+
+    setupCalibrationPoints();
+
+  } catch(error) {
+    console.error(error);
+
+    calibrationStatus.textContent=
+      'Ошибка WebGazer: '+(error?.message||String(error));
+  }
 })();
